@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-bg: 11 14 18;
+  --color-surface: 18 22 28;
+  --color-elevated: 24 29 38;
+  --color-border: 35 41 53;
+  --color-ink: 237 239 242;
+  --color-muted: 140 148 163;
+  --color-amber: 242 166 59;
+  --color-live: 255 92 92;
+  --color-done: 61 214 140;
+  --color-info: 96 161 249;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background-color: rgb(var(--color-bg));
+  color: rgb(var(--color-ink));
+}
