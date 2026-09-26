@@ -49,13 +49,25 @@ export interface StandingsData {
   error: string | null;
 }
 
-interface RawCompletedMatch {
+export interface RawCompletedMatch {
   id: string;
   tournament_id: string | null;
   team_a_id: string | null;
   team_b_id: string | null;
   team_a_score: number | null;
   team_b_score: number | null;
+}
+
+/** Shared read from Supabase: every tournament, every completed match, and
+ * the names of every team that appears in one of those matches. Standings
+ * and Statistics both build on this same context rather than each running
+ * their own copy of the tournaments/matches/teams queries. */
+export interface CompletedMatchesContext {
+  tournaments: TournamentOption[];
+  completedMatches: RawCompletedMatch[];
+  teamNameById: Map<string, string>;
+  supabaseNotConfigured: boolean;
+  error: string | null;
 }
 
 function emptyResult(overrides: Partial<StandingsData> = {}): StandingsData {
@@ -145,14 +157,24 @@ export function calculateStandings(
   return standings;
 }
 
-/** Loads tournaments, teams, and completed matches from Supabase and
- * computes standings for every tournament in one pass. Never throws —
- * Supabase not being configured, or any single query failing, is reported
- * via `supabaseNotConfigured` / `error` on the returned object so the
- * Standings page can render a helpful empty state instead of crashing. */
-export async function loadStandingsData(): Promise<StandingsData> {
+/** Reads tournaments, completed matches, and the names of every team that
+ * appears in one of those matches from Supabase. Never throws — Supabase
+ * not being configured, or any query failing, is reported via
+ * `supabaseNotConfigured` / `error` on the returned object instead. Shared
+ * by both `loadStandingsData()` (below) and `lib/statistics.ts`, so the
+ * Supabase reads for this feature live in exactly one place. */
+export async function fetchCompletedMatchesContext(): Promise<CompletedMatchesContext> {
+  const empty = (overrides: Partial<CompletedMatchesContext> = {}): CompletedMatchesContext => ({
+    tournaments: [],
+    completedMatches: [],
+    teamNameById: new Map(),
+    supabaseNotConfigured: false,
+    error: null,
+    ...overrides,
+  });
+
   if (!isSupabaseConfigured() || !supabase) {
-    return emptyResult({ supabaseNotConfigured: true });
+    return empty({ supabaseNotConfigured: true });
   }
 
   try {
@@ -166,11 +188,11 @@ export async function loadStandingsData(): Promise<StandingsData> {
 
     if (tournamentsResult.error) {
       console.error("[standings] Failed to fetch tournaments from Supabase:", tournamentsResult.error);
-      return emptyResult({ error: tournamentsResult.error.message });
+      return empty({ error: tournamentsResult.error.message });
     }
     if (matchesResult.error) {
       console.error("[standings] Failed to fetch completed matches from Supabase:", matchesResult.error);
-      return emptyResult({ error: matchesResult.error.message });
+      return empty({ error: matchesResult.error.message });
     }
 
     const tournaments: TournamentOption[] = (tournamentsResult.data ?? []).map((t) => ({
@@ -192,27 +214,38 @@ export async function loadStandingsData(): Promise<StandingsData> {
       const teamsResult = await supabase.from("teams").select("id, name").in("id", teamIds);
       if (teamsResult.error) {
         console.error("[standings] Failed to fetch teams from Supabase:", teamsResult.error);
-        return emptyResult({ tournaments, error: teamsResult.error.message });
+        return empty({ tournaments, completedMatches, error: teamsResult.error.message });
       }
       teamNameById = new Map((teamsResult.data ?? []).map((t) => [t.id, t.name as string]));
     }
 
-    const matchesByTournament = new Map<string, RawCompletedMatch[]>();
-    for (const match of completedMatches) {
-      if (!match.tournament_id) continue;
-      const list = matchesByTournament.get(match.tournament_id) ?? [];
-      list.push(match);
-      matchesByTournament.set(match.tournament_id, list);
-    }
-
-    const standingsByTournament: Record<string, TeamStanding[]> = {};
-    for (const [tournamentId, tournamentMatches] of matchesByTournament) {
-      standingsByTournament[tournamentId] = calculateStandings(tournamentMatches, teamNameById);
-    }
-
-    return emptyResult({ tournaments, standingsByTournament });
+    return empty({ tournaments, completedMatches, teamNameById });
   } catch (err) {
-    console.error("[standings] Unexpected error loading standings from Supabase:", err);
-    return emptyResult({ error: err instanceof Error ? err.message : String(err) });
+    console.error("[standings] Unexpected error loading standings context from Supabase:", err);
+    return empty({ error: err instanceof Error ? err.message : String(err) });
   }
+}
+
+/** Loads tournaments, teams, and completed matches from Supabase and
+ * computes standings for every tournament in one pass. Never throws — see
+ * `fetchCompletedMatchesContext()`, which does the actual reading. */
+export async function loadStandingsData(): Promise<StandingsData> {
+  const ctx = await fetchCompletedMatchesContext();
+  if (ctx.supabaseNotConfigured) return emptyResult({ supabaseNotConfigured: true });
+  if (ctx.error) return emptyResult({ tournaments: ctx.tournaments, error: ctx.error });
+
+  const matchesByTournament = new Map<string, RawCompletedMatch[]>();
+  for (const match of ctx.completedMatches) {
+    if (!match.tournament_id) continue;
+    const list = matchesByTournament.get(match.tournament_id) ?? [];
+    list.push(match);
+    matchesByTournament.set(match.tournament_id, list);
+  }
+
+  const standingsByTournament: Record<string, TeamStanding[]> = {};
+  for (const [tournamentId, tournamentMatches] of matchesByTournament) {
+    standingsByTournament[tournamentId] = calculateStandings(tournamentMatches, ctx.teamNameById);
+  }
+
+  return emptyResult({ tournaments: ctx.tournaments, standingsByTournament });
 }
